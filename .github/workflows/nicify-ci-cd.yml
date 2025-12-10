@@ -1,0 +1,59 @@
+name: Nicify CI/CD
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      AWS_REGION: us-east-1
+
+    steps:
+      # 1. Checkout repo
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # 2. Configure AWS credentials
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # 3. Package Lambda: tracks_api
+      - name: Package tracks_api lambda
+        run: |
+          zip -j backend/tracks_api/tracks_api.zip backend/tracks_api/lambda_function.py
+
+      # 4. Package Lambda: tracks_stream
+      - name: Package tracks_stream lambda
+        run: |
+          zip -j backend/tracks_stream/tracks_stream.zip backend/tracks_stream/lambda_function.py
+
+      # 5. Set up Terraform
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.0
+
+      # 6. Terraform init
+      - name: Terraform init
+        working-directory: ./terraform
+        run: terraform init
+
+      # 7. Terraform apply
+      - name: Terraform apply
+        working-directory: ./terraform
+        run: terraform apply -auto-approve
+
+      # 8. Upload frontend index.html to S3 site bucket
+      - name: Upload frontend index.html to site bucket
+        working-directory: ./terraform
+        run: |
+          SITE_BUCKET=$(terraform output -raw site_bucket_name)
+          aws s3 cp ../frontend/index.html s3://$SITE_BUCKET/index.html --acl public-read
