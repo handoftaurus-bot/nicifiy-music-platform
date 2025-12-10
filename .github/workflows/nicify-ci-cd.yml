@@ -47,7 +47,7 @@ jobs:
         run: terraform init
 
       # 7. Terraform apply (changed to plan to not create new resources)
-       - name: Terraform plan (no apply on CI)
+      - name: Terraform plan (no apply on CI)
         working-directory: ./terraform
         run: terraform plan
 
