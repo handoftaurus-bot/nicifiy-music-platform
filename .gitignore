@@ -2,18 +2,10 @@
 .terraform/
 terraform.tfstate
 terraform.tfstate.*
-crash.log
-crash.*.log
 
-# Lambda build artifacts
+# Lambda zips
 backend/**/*.zip
 
-# Node / frontend
+# Node / frontend (if using Vite later)
 node_modules/
 dist/
-build/
-
-# OS / editor junk
-.DS_Store
-Thumbs.db
-.vscode/
