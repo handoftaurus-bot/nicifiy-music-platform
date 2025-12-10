@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Nicify - Hand Of Taurus Radio</title>
+  <style>
+    body { 
+      font-family: Arial, sans-serif; 
+      padding: 40px; 
+      background: #111; 
+      color: #eee;
+      text-align: center;
+    }
+    h1 { color: #4de; }
+    audio { margin-top: 20px; width: 80%; }
+  </style>
+</head>
+<body>
+  <h1>Nicify – Hand Of Taurus Radio</h1>
+  <p>Hosted on AWS </p>
+
+  <audio id="player" controls>
+    Your browser does not support audio playback.
+  </audio>
+
+<script>
+  const API_BASE = "https://czzz7fhbn6.execute-api.us-east-1.amazonaws.com";
+
+  const audio = document.getElementById("player");
+
+  async function loadAndPlayFirstTrack() {
+    try {
+      // 1. Get track list
+      const tracksRes = await fetch(`${API_BASE}/tracks`);
+      const tracksData = await tracksRes.json();
+
+      if (!tracksData.tracks || tracksData.tracks.length === 0) {
+        console.error("No tracks found from API");
+        return;
+      }
+
+      const firstTrack = tracksData.tracks[0];
+      const trackId = firstTrack.track_id;
+
+      // 2. Get stream URL for that track
+      const streamRes = await fetch(`${API_BASE}/tracks/${encodeURIComponent(trackId)}/stream`);
+      const streamData = await streamRes.json();
+
+      if (!streamData.stream_url) {
+        console.error("No stream_url in response", streamData);
+        return;
+      }
+
+      // 3. Set audio src and let user play
+      audio.src = streamData.stream_url;
+      // Optionally auto-play (some browsers block this without user interaction)
+      // await audio.play();
+
+      console.log("Loaded track:", firstTrack.title, "->", streamData.stream_url);
+    } catch (err) {
+      console.error("Error loading track:", err);
+    }
+  }
+
+  loadAndPlayFirstTrack();
+</script>
+
+</body>
+</html>

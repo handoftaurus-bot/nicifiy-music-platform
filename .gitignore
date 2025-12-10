@@ -1,0 +1,19 @@
+# Terraform
+.terraform/
+terraform.tfstate
+terraform.tfstate.*
+crash.log
+crash.*.log
+
+# Lambda build artifacts
+backend/**/*.zip
+
+# Node / frontend
+node_modules/
+dist/
+build/
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.vscode/
