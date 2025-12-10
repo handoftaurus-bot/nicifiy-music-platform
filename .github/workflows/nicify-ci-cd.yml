@@ -46,10 +46,11 @@ jobs:
         working-directory: ./terraform
         run: terraform init
 
-      # 7. Terraform apply
-      - name: Terraform apply
+      # 7. Terraform apply (changed to plan to not create new resources)
+       - name: Terraform plan (no apply on CI)
         working-directory: ./terraform
-        run: terraform apply -auto-approve
+        run: terraform plan
+
 
       # 8. Upload frontend index.html to S3 site bucket
       - name: Upload frontend index.html to site bucket
