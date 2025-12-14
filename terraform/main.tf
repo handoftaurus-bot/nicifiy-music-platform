@@ -239,6 +239,45 @@ resource "aws_lambda_function" "tracks_stream" {
 }
 
 # -----------------------------
+# Lambda: S3 ingest for raw uploads
+# -----------------------------
+resource "aws_lambda_function" "ingest" {
+  function_name = "${local.project_name}-ingest"
+  role          = aws_iam_role.lambda_exec.arn
+  handler       = "lambda_function.lambda_handler"
+  runtime       = "python3.11"
+
+  filename         = "${path.module}/../backend/ingest/ingest.zip"
+  source_code_hash = filebase64sha256("${path.module}/../backend/ingest/ingest.zip")
+
+  environment {
+    variables = {
+      TRACKS_TABLE = aws_dynamodb_table.tracks.name
+      AUDIO_BUCKET = aws_s3_bucket.audio.bucket
+    }
+  }
+}
+resource "aws_lambda_permission" "s3_invoke_ingest" {
+  statement_id  = "AllowS3InvokeIngest"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.ingest.function_name
+  principal     = "s3.amazonaws.com"
+  source_arn    = aws_s3_bucket.raw.arn
+}
+resource "aws_s3_bucket_notification" "raw_bucket_notification" {
+  bucket = aws_s3_bucket.raw.id
+
+  lambda_function {
+    lambda_function_arn = aws_lambda_function.ingest.arn
+    events              = ["s3:ObjectCreated:*"]
+    # Add prefix filters later if needed, e.g.:
+    # filter_prefix       = "uploads/"
+  }
+
+  depends_on = [aws_lambda_permission.s3_invoke_ingest]
+}
+
+# -----------------------------
 # API Gateway HTTP API
 # -----------------------------
 resource "aws_apigatewayv2_api" "api" {
