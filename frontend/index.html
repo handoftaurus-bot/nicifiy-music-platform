@@ -2,68 +2,242 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Nicify - Hand Of Taurus Radio</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nicify</title>
   <style>
-    body { 
-      font-family: Arial, sans-serif; 
-      padding: 40px; 
-      background: #111; 
-      color: #eee;
-      text-align: center;
+    body {
+      font-family: Arial, sans-serif;
+      padding: 24px;
+      background: #0f1115;
+      color: #e7e7e7;
+      max-width: 900px;
+      margin: 0 auto;
     }
-    h1 { color: #4de; }
-    audio { margin-top: 20px; width: 80%; }
+    h1 { margin: 0 0 8px; }
+    .sub { color: #9aa4b2; margin-bottom: 18px; }
+
+    .card {
+      background: #151922;
+      border: 1px solid #232a36;
+      border-radius: 12px;
+      padding: 16px;
+      margin: 12px 0;
+    }
+
+    .row {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+    }
+
+    button {
+      background: #2b90ff;
+      border: none;
+      color: white;
+      padding: 10px 12px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .tracks {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .track {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px;
+      border-radius: 10px;
+      border: 1px solid #232a36;
+      background: #10141c;
+    }
+
+    .track:hover { border-color: #2b90ff; }
+
+    .meta {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .title { font-weight: 700; }
+    .small { color: #9aa4b2; font-size: 12px; }
+
+    audio { width: 100%; margin-top: 10px; }
+
+    .status {
+      margin-top: 10px;
+      padding: 10px;
+      border-radius: 10px;
+      background: #0b1220;
+      border: 1px solid #232a36;
+      color: #9aa4b2;
+      white-space: pre-wrap;
+    }
+
+    .error { color: #ff6b6b; }
+    .ok { color: #7ee787; }
   </style>
 </head>
 <body>
-  <h1>Nicify – Hand Of Taurus Radio</h1>
-  <p>Hosted on AWS </p>
+  <h1>Hotify</h1>
+  <div class="sub">Hand Of Taurus Radio</div>
 
-  <audio id="player" controls>
-    Your browser does not support audio playback.
-  </audio>
+  <div class="card">
+    <div class="row">
+      <div>
+        <div class="title">Now Playing</div>
+        <div id="nowPlaying" class="small">Nothing yet</div>
+      </div>
+      <div>
+        <button id="refreshBtn">Refresh Tracks</button>
+      </div>
+    </div>
 
-<script>
-  const API_BASE = "https://czzz7fhbn6.execute-api.us-east-1.amazonaws.com";
+    <audio id="player" controls></audio>
 
-  const audio = document.getElementById("player");
+    <div id="status" class="status">Status: ready</div>
+  </div>
 
-  async function loadAndPlayFirstTrack() {
-    try {
-      // 1. Get track list
-      const tracksRes = await fetch(`${API_BASE}/tracks`);
-      const tracksData = await tracksRes.json();
+  <div class="card">
+    <div class="title">Tracks</div>
+    <div id="tracks" class="tracks"></div>
+  </div>
 
-      if (!tracksData.tracks || tracksData.tracks.length === 0) {
-        console.error("No tracks found from API");
-        return;
-      }
+  <script>
+    const API_BASE = "https://czzz7fhbn6.execute-api.us-east-1.amazonaws.com"; <!-- API Gateway URL -->
 
-      const firstTrack = tracksData.tracks[0];
-      const trackId = firstTrack.track_id;
+    const player = document.getElementById("player");
+    const tracksEl = document.getElementById("tracks");
+    const nowPlayingEl = document.getElementById("nowPlaying");
+    const statusEl = document.getElementById("status");
+    const refreshBtn = document.getElementById("refreshBtn");
 
-      // 2. Get stream URL for that track
-      const streamRes = await fetch(`${API_BASE}/tracks/${encodeURIComponent(trackId)}/stream`);
-      const streamData = await streamRes.json();
-
-      if (!streamData.stream_url) {
-        console.error("No stream_url in response", streamData);
-        return;
-      }
-
-      // 3. Set audio src and let user play
-      audio.src = streamData.stream_url;
-      // Optionally auto-play (some browsers block this without user interaction)
-      // await audio.play();
-
-      console.log("Loaded track:", firstTrack.title, "->", streamData.stream_url);
-    } catch (err) {
-      console.error("Error loading track:", err);
+    function setStatus(msg, type="") {
+      statusEl.textContent = `Status: ${msg}`;
+      statusEl.classList.remove("error", "ok");
+      if (type) statusEl.classList.add(type);
     }
-  }
 
-  loadAndPlayFirstTrack();
-</script>
+    async function fetchJson(url) {
+      const res = await fetch(url, { cache: "no-store" });
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = { raw: text }; }
 
+      if (!res.ok) {
+        const errMsg = data?.error || data?.message || `${res.status} ${res.statusText}`;
+        throw new Error(`${errMsg}\nURL: ${url}`);
+      }
+      return data;
+    }
+
+    function renderTracks(tracks) {
+      tracksEl.innerHTML = "";
+
+      if (!tracks || tracks.length === 0) {
+        tracksEl.innerHTML = `<div class="small">No tracks found. Upload to the raw bucket (Day 9) or add an item to DynamoDB.</div>`;
+        return;
+      }
+
+      for (const t of tracks) {
+        const title = t.title || t.track_id || "Untitled";
+        const streamPath = t.stream_path || "(no stream_path)";
+
+        const div = document.createElement("div");
+        div.className = "track";
+
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.innerHTML = `
+          <div class="title">${escapeHtml(title)}</div>
+          <div class="small">ID: ${escapeHtml(t.track_id || "")}</div>
+          <div class="small">Path: ${escapeHtml(streamPath)}</div>
+        `;
+
+        const btn = document.createElement("button");
+        btn.textContent = "Play";
+        btn.onclick = () => playTrack(t);
+
+        div.appendChild(meta);
+        div.appendChild(btn);
+        tracksEl.appendChild(div);
+      }
+    }
+
+    async function loadTracks() {
+      setStatus("loading tracks...");
+      refreshBtn.disabled = true;
+
+      try {
+        const data = await fetchJson(`${API_BASE}/tracks`);
+        const tracks = data.tracks || [];
+        // Optional: sort newest-ish by track_id string, not perfect but helps
+        tracks.sort((a, b) => (b.track_id || "").localeCompare(a.track_id || ""));
+        renderTracks(tracks);
+        setStatus(`loaded ${tracks.length} track(s)`, "ok");
+      } catch (err) {
+        console.error(err);
+        setStatus(err.message, "error");
+      } finally {
+        refreshBtn.disabled = false;
+      }
+    }
+
+    async function playTrack(track) {
+      const trackId = track.track_id;
+      if (!trackId) {
+        setStatus("Track missing track_id; can't request stream URL.", "error");
+        return;
+      }
+
+      setStatus(`fetching stream URL for ${trackId}...`);
+      try {
+        const data = await fetchJson(`${API_BASE}/tracks/${encodeURIComponent(trackId)}/stream`);
+        const url = data.stream_url;
+
+        if (!url) {
+          setStatus("No stream_url returned by API.", "error");
+          return;
+        }
+
+        player.src = url;
+        nowPlayingEl.textContent = `${track.title || trackId}`;
+        setStatus(`stream URL set. Hit play (or it may auto-play).`, "ok");
+
+        // Auto-play often works after a click (browser allows it since user interacted)
+        try { await player.play(); } catch (_) {}
+      } catch (err) {
+        console.error(err);
+        setStatus(err.message, "error");
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    refreshBtn.addEventListener("click", loadTracks);
+
+    // initial load
+    loadTracks();
+  </script>
 </body>
 </html>
