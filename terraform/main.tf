@@ -249,6 +249,9 @@ resource "aws_lambda_function" "ingest" {
 
   filename         = "${path.module}/../backend/ingest/ingest.zip"
   source_code_hash = filebase64sha256("${path.module}/../backend/ingest/ingest.zip")
+  layers = [aws_lambda_layer_version.ffmpeg.arn]
+  timeout     = 120
+  memory_size = 1024
 
   environment {
     variables = {
@@ -275,6 +278,12 @@ resource "aws_s3_bucket_notification" "raw_bucket_notification" {
   }
 
   depends_on = [aws_lambda_permission.s3_invoke_ingest]
+}
+
+resource "aws_lambda_layer_version" "ffmpeg" {
+  layer_name          = "${local.project_name}-ffmpeg"
+  filename            = "${path.module}/../ffmpeg-layer.zip"
+  compatible_runtimes = ["python3.11"]
 }
 
 # -----------------------------
