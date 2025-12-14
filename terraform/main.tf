@@ -35,6 +35,10 @@ resource "aws_s3_bucket" "audio" {
   bucket = "${local.project_name}-audio-${random_id.suffix.hex}"
 }
 
+resource "aws_s3_bucket" "raw" {
+  bucket = "${local.project_name}-raw-${random_id.suffix.hex}"
+}
+
 # -----------------------------
 # CloudFront for site (web UI)
 # -----------------------------
@@ -167,9 +171,29 @@ resource "aws_iam_role_policy" "lambda_policy" {
         Effect = "Allow"
         Action = [
           "dynamodb:Scan",
-          "dynamodb:GetItem"
+          "dynamodb:GetItem",
+          "dynamodb:PutItem"
         ]
         Resource = aws_dynamodb_table.tracks.arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+        ]
+        Resource = [
+          "${aws_s3_bucket.raw.arn}/*"
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",
+          "s3:CopyObject",
+        ]
+        Resource = [
+          "${aws_s3_bucket.audio.arn}/*"
+        ]
       }
     ]
   })
