@@ -24,8 +24,15 @@ resource "random_id" "suffix" {
   byte_length = 4
 }
 
+data "aws_caller_identity" "current" {}
+
+# Private key for CloudFront signed URLs stored in Secrets Manager
+data "aws_secretsmanager_secret" "cf_private_key" {
+  arn = "arn:aws:secretsmanager:us-east-1:893134765816:secret:nicify/cloudfront/private-key-avNneE"
+}
+
 # -----------------------------
-# S3 buckets: site + audio
+# S3 buckets: site + audio + raw
 # -----------------------------
 resource "aws_s3_bucket" "site" {
   bucket = "${local.project_name}-web-${random_id.suffix.hex}"
@@ -39,6 +46,49 @@ resource "aws_s3_bucket" "raw" {
   bucket = "${local.project_name}-raw-${random_id.suffix.hex}"
 }
 
+# Block ALL public access (recommended with CloudFront OAC)
+resource "aws_s3_bucket_public_access_block" "site" {
+  bucket                  = aws_s3_bucket.site.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_public_access_block" "audio" {
+  bucket                  = aws_s3_bucket.audio.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+# (Optional, but usually good) also block public access on raw
+resource "aws_s3_bucket_public_access_block" "raw" {
+  bucket                  = aws_s3_bucket.raw.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+# -----------------------------
+# CloudFront Origin Access Control (OAC)
+# -----------------------------
+resource "aws_cloudfront_origin_access_control" "site_oac" {
+  name                              = "${local.project_name}-site-oac"
+  origin_access_control_origin_type = "s3"
+  signing_behavior                  = "always"
+  signing_protocol                  = "sigv4"
+}
+
+resource "aws_cloudfront_origin_access_control" "audio_oac" {
+  name                              = "${local.project_name}-audio-oac"
+  origin_access_control_origin_type = "s3"
+  signing_behavior                  = "always"
+  signing_protocol                  = "sigv4"
+}
+
 # -----------------------------
 # CloudFront for site (web UI)
 # -----------------------------
@@ -47,18 +97,22 @@ resource "aws_cloudfront_distribution" "site" {
   default_root_object = "index.html"
 
   origin {
-    domain_name = aws_s3_bucket.site.bucket_regional_domain_name
-    origin_id   = "site-origin"
+    domain_name              = aws_s3_bucket.site.bucket_regional_domain_name
+    origin_id                = "site-origin"
+    origin_access_control_id = aws_cloudfront_origin_access_control.site_oac.id
   }
 
   default_cache_behavior {
     target_origin_id       = "site-origin"
     viewer_protocol_policy = "redirect-to-https"
 
-    allowed_methods  = ["GET", "HEAD"]
-    cached_methods   = ["GET", "HEAD"]
+    allowed_methods = ["GET", "HEAD"]
+    cached_methods  = ["GET", "HEAD"]
 
     compress = true
+
+    # Keep site public via CloudFront (not restricted by key groups)
+    trusted_key_groups = []
 
     forwarded_values {
       query_string = false
@@ -86,16 +140,17 @@ resource "aws_cloudfront_distribution" "audio" {
   enabled = true
 
   origin {
-    domain_name = aws_s3_bucket.audio.bucket_regional_domain_name
-    origin_id   = "audio-origin"
+    domain_name              = aws_s3_bucket.audio.bucket_regional_domain_name
+    origin_id                = "audio-origin"
+    origin_access_control_id = aws_cloudfront_origin_access_control.audio_oac.id
   }
 
   default_cache_behavior {
     target_origin_id       = "audio-origin"
     viewer_protocol_policy = "redirect-to-https"
 
-    allowed_methods  = ["GET", "HEAD"]
-    cached_methods   = ["GET", "HEAD"]
+    allowed_methods = ["GET", "HEAD"]
+    cached_methods  = ["GET", "HEAD"]
 
     compress = true
 
@@ -116,6 +171,53 @@ resource "aws_cloudfront_distribution" "audio" {
   viewer_certificate {
     cloudfront_default_certificate = true
   }
+}
+
+# -----------------------------
+# Bucket policies: allow CloudFront OAC access ONLY
+# -----------------------------
+resource "aws_s3_bucket_policy" "site_policy" {
+  bucket = aws_s3_bucket.site.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid    = "AllowCloudFrontReadOnlySite"
+      Effect = "Allow"
+      Principal = {
+        Service = "cloudfront.amazonaws.com"
+      }
+      Action   = "s3:GetObject"
+      Resource = "${aws_s3_bucket.site.arn}/*"
+      Condition = {
+        StringEquals = {
+          "AWS:SourceArn" = aws_cloudfront_distribution.site.arn
+        }
+      }
+    }]
+  })
+}
+
+resource "aws_s3_bucket_policy" "audio_policy" {
+  bucket = aws_s3_bucket.audio.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid    = "AllowCloudFrontReadOnlyAudio"
+      Effect = "Allow"
+      Principal = {
+        Service = "cloudfront.amazonaws.com"
+      }
+      Action   = "s3:GetObject"
+      Resource = "${aws_s3_bucket.audio.arn}/*"
+      Condition = {
+        StringEquals = {
+          "AWS:SourceArn" = aws_cloudfront_distribution.audio.arn
+        }
+      }
+    }]
+  })
 }
 
 # -----------------------------
@@ -159,39 +261,33 @@ resource "aws_iam_role_policy" "lambda_policy" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow"
-        Action = [
-          "logs:CreateLogGroup",
-          "logs:CreateLogStream",
-          "logs:PutLogEvents"
-        ]
+        Effect   = "Allow"
+        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
         Resource = "arn:aws:logs:*:*:*"
       },
       {
-        Effect = "Allow"
-        Action = [
-          "dynamodb:Scan",
-          "dynamodb:GetItem",
-          "dynamodb:PutItem"
-        ]
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
+        Resource = data.aws_secretsmanager_secret.cf_private_key.arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["dynamodb:Scan", "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
         Resource = aws_dynamodb_table.tracks.arn
       },
       {
-        Effect = "Allow"
-        Action = [
-          "s3:GetObject",
-        ]
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:ListBucket"]
         Resource = [
+          aws_s3_bucket.raw.arn,
           "${aws_s3_bucket.raw.arn}/*"
         ]
       },
       {
-        Effect = "Allow"
-        Action = [
-          "s3:PutObject",
-          "s3:CopyObject",
-        ]
+        Effect   = "Allow"
+        Action   = ["s3:PutObject", "s3:CopyObject", "s3:ListBucket"]
         Resource = [
+          aws_s3_bucket.audio.arn,
           "${aws_s3_bucket.audio.arn}/*"
         ]
       }
@@ -218,6 +314,12 @@ resource "aws_lambda_function" "tracks_api" {
   }
 }
 
+resource "aws_lambda_layer_version" "cf_sign_crypto" {
+  layer_name          = "${local.project_name}-cf-sign-crypto"
+  filename            = "${path.module}/../cf-sign-layer.zip"
+  compatible_runtimes = ["python3.11"]
+}
+
 # -----------------------------
 # Lambda: GET /tracks/{track_id}/stream
 # -----------------------------
@@ -226,16 +328,30 @@ resource "aws_lambda_function" "tracks_stream" {
   role          = aws_iam_role.lambda_exec.arn
   handler       = "lambda_function.lambda_handler"
   runtime       = "python3.11"
+  filename      = "${path.module}/../backend/tracks_stream/tracks_stream.zip"
 
-  filename         = "${path.module}/../backend/tracks_stream/tracks_stream.zip"
   source_code_hash = filebase64sha256("${path.module}/../backend/tracks_stream/tracks_stream.zip")
+
+  timeout     = 10
+  memory_size = 256
 
   environment {
     variables = {
-      TRACKS_TABLE   = aws_dynamodb_table.tracks.name
-      AUDIO_BASE_URL = "https://${aws_cloudfront_distribution.audio.domain_name}"
+      TRACKS_TABLE              = aws_dynamodb_table.tracks.name
+      AUDIO_CLOUDFRONT_DOMAIN   = "d6nzi83530c59.cloudfront.net"
+      CF_KEY_PAIR_ID            = "KYAKHQVQWCK9M"
+      CF_PRIVATE_KEY_SECRET_ARN = data.aws_secretsmanager_secret.cf_private_key.arn
     }
   }
+}
+
+# -----------------------------
+# Lambda layer: ffmpeg
+# -----------------------------
+resource "aws_lambda_layer_version" "ffmpeg" {
+  layer_name          = "${local.project_name}-ffmpeg"
+  filename            = "${path.module}/../ffmpeg-layer.zip"
+  compatible_runtimes = ["python3.11"]
 }
 
 # -----------------------------
@@ -249,9 +365,9 @@ resource "aws_lambda_function" "ingest" {
 
   filename         = "${path.module}/../backend/ingest/ingest.zip"
   source_code_hash = filebase64sha256("${path.module}/../backend/ingest/ingest.zip")
-  layers = [aws_lambda_layer_version.ffmpeg.arn]
-  timeout     = 120
-  memory_size = 1024
+  layers           = [aws_lambda_layer_version.ffmpeg.arn]
+  timeout          = 120
+  memory_size      = 1024
 
   environment {
     variables = {
@@ -260,6 +376,7 @@ resource "aws_lambda_function" "ingest" {
     }
   }
 }
+
 resource "aws_lambda_permission" "s3_invoke_ingest" {
   statement_id  = "AllowS3InvokeIngest"
   action        = "lambda:InvokeFunction"
@@ -267,23 +384,16 @@ resource "aws_lambda_permission" "s3_invoke_ingest" {
   principal     = "s3.amazonaws.com"
   source_arn    = aws_s3_bucket.raw.arn
 }
+
 resource "aws_s3_bucket_notification" "raw_bucket_notification" {
   bucket = aws_s3_bucket.raw.id
 
   lambda_function {
     lambda_function_arn = aws_lambda_function.ingest.arn
     events              = ["s3:ObjectCreated:*"]
-    # Add prefix filters later if needed, e.g.:
-    # filter_prefix       = "uploads/"
   }
 
   depends_on = [aws_lambda_permission.s3_invoke_ingest]
-}
-
-resource "aws_lambda_layer_version" "ffmpeg" {
-  layer_name          = "${local.project_name}-ffmpeg"
-  filename            = "${path.module}/../ffmpeg-layer.zip"
-  compatible_runtimes = ["python3.11"]
 }
 
 # -----------------------------
