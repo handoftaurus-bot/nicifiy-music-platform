@@ -26,10 +26,10 @@ resource "random_id" "suffix" {
 
 data "aws_caller_identity" "current" {}
 
-# Private key for CloudFront signed URLs stored in Secrets Manager
-data "aws_secretsmanager_secret" "cf_private_key" {
-  arn = "arn:aws:secretsmanager:us-east-1:893134765816:secret:nicify/cloudfront/private-key-avNneE"
+data "aws_s3_bucket" "raw" {
+  bucket = "nicify-raw-0238b3fd"
 }
+
 
 # -----------------------------
 # S3 buckets: site + audio + raw
@@ -40,10 +40,6 @@ resource "aws_s3_bucket" "site" {
 
 resource "aws_s3_bucket" "audio" {
   bucket = "${local.project_name}-audio-${random_id.suffix.hex}"
-}
-
-resource "aws_s3_bucket" "raw" {
-  bucket = "${local.project_name}-raw-${random_id.suffix.hex}"
 }
 
 # Block ALL public access (recommended with CloudFront OAC)
@@ -57,15 +53,6 @@ resource "aws_s3_bucket_public_access_block" "site" {
 
 resource "aws_s3_bucket_public_access_block" "audio" {
   bucket                  = aws_s3_bucket.audio.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-# (Optional, but usually good) also block public access on raw
-resource "aws_s3_bucket_public_access_block" "raw" {
-  bucket                  = aws_s3_bucket.raw.id
   block_public_acls       = true
   block_public_policy     = true
   ignore_public_acls      = true
@@ -88,6 +75,73 @@ resource "aws_cloudfront_origin_access_control" "audio_oac" {
   signing_behavior                  = "always"
   signing_protocol                  = "sigv4"
 }
+
+# -----------------------------
+# CloudFront Response Headers Policy (CORS) for audio
+# -----------------------------
+resource "aws_cloudfront_response_headers_policy" "audio_cors" {
+  name = "${local.project_name}-audio-cors"
+
+  cors_config {
+    access_control_allow_credentials = false
+
+    access_control_allow_headers {
+      items = ["*"]
+    }
+
+    access_control_allow_methods {
+      items = ["GET", "HEAD", "OPTIONS"]
+    }
+
+    access_control_allow_origins {
+      # Tighten later to your site domain(s) once confirmed working
+      items = ["*"]
+    }
+
+    origin_override = true
+  }
+}
+
+resource "aws_s3_bucket_cors_configuration" "audio_cors" {
+  bucket = aws_s3_bucket.audio.id
+
+  cors_rule {
+    allowed_methods = ["GET", "HEAD"]
+    allowed_origins = ["*"]         # tighten later
+    allowed_headers = ["*"]         # includes Range
+
+    expose_headers = [
+      "Accept-Ranges",
+      "Content-Range",
+      "Content-Length",
+      "ETag"
+    ]
+
+    max_age_seconds = 3000
+  }
+}
+
+# -----------------------------
+# S3 CORS: raw uploads (browser PUT to presigned URL)
+# -----------------------------
+resource "aws_s3_bucket_cors_configuration" "raw_cors" {
+  bucket = data.aws_s3_bucket.raw.id
+
+  cors_rule {
+    allowed_methods = ["PUT", "POST", "HEAD"]
+    allowed_origins = ["https://${aws_cloudfront_distribution.site.domain_name}"]
+    allowed_headers = ["*"]
+
+    expose_headers = [
+      "ETag",
+      "x-amz-request-id",
+      "x-amz-id-2"
+    ]
+
+    max_age_seconds = 3000
+  }
+}
+
 
 # -----------------------------
 # CloudFront for site (web UI)
@@ -149,10 +203,14 @@ resource "aws_cloudfront_distribution" "audio" {
     target_origin_id       = "audio-origin"
     viewer_protocol_policy = "redirect-to-https"
 
-    allowed_methods = ["GET", "HEAD"]
+    # Add OPTIONS so browsers can preflight if needed
+    allowed_methods = ["GET", "HEAD", "OPTIONS"]
     cached_methods  = ["GET", "HEAD"]
 
     compress = true
+
+    # CORS headers for audio responses served by CloudFront
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.audio_cors.id
 
     forwarded_values {
       query_string = false
@@ -267,11 +325,6 @@ resource "aws_iam_role_policy" "lambda_policy" {
       },
       {
         Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue"]
-        Resource = data.aws_secretsmanager_secret.cf_private_key.arn
-      },
-      {
-        Effect   = "Allow"
         Action   = ["dynamodb:Scan", "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
         Resource = aws_dynamodb_table.tracks.arn
       },
@@ -279,9 +332,10 @@ resource "aws_iam_role_policy" "lambda_policy" {
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:ListBucket"]
         Resource = [
-          aws_s3_bucket.raw.arn,
-          "${aws_s3_bucket.raw.arn}/*"
+          data.aws_s3_bucket.raw.arn,
+         "${data.aws_s3_bucket.raw.arn}/*"
         ]
+
       },
       {
         Effect   = "Allow"
@@ -290,7 +344,31 @@ resource "aws_iam_role_policy" "lambda_policy" {
           aws_s3_bucket.audio.arn,
           "${aws_s3_bucket.audio.arn}/*"
         ]
-      }
+      },
+        # Allow uploads_init to PUT into raw bucket under raw/*
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",
+          "s3:AbortMultipartUpload",
+          "s3:ListBucketMultipartUploads",
+          "s3:ListMultipartUploadParts"
+        ]
+        Resource = [
+          "${data.aws_s3_bucket.raw.arn}/raw/*"
+        ]
+      },
+      # Optional: allow listing only that prefix (useful for troubleshooting/tools)
+      {
+        Effect = "Allow"
+        Action = ["s3:ListBucket"]
+        Resource = [data.aws_s3_bucket.raw.arn]
+        Condition = {
+          StringLike = {
+            "s3:prefix" = ["raw/*"]
+          }
+        }
+      },
     ]
   })
 }
@@ -314,12 +392,6 @@ resource "aws_lambda_function" "tracks_api" {
   }
 }
 
-resource "aws_lambda_layer_version" "cf_sign_crypto" {
-  layer_name          = "${local.project_name}-cf-sign-crypto"
-  filename            = "${path.module}/../cf-sign-layer.zip"
-  compatible_runtimes = ["python3.11"]
-}
-
 # -----------------------------
 # Lambda: GET /tracks/{track_id}/stream
 # -----------------------------
@@ -335,12 +407,37 @@ resource "aws_lambda_function" "tracks_stream" {
   timeout     = 10
   memory_size = 256
 
+  # Explicitly no layers (prevents cryptography/glibc issues)
+  layers = []
+
   environment {
     variables = {
-      TRACKS_TABLE              = aws_dynamodb_table.tracks.name
-      AUDIO_CLOUDFRONT_DOMAIN   = "d6nzi83530c59.cloudfront.net"
-      CF_KEY_PAIR_ID            = "KYAKHQVQWCK9M"
-      CF_PRIVATE_KEY_SECRET_ARN = data.aws_secretsmanager_secret.cf_private_key.arn
+      TRACKS_TABLE            = aws_dynamodb_table.tracks.name
+      AUDIO_CLOUDFRONT_DOMAIN = aws_cloudfront_distribution.audio.domain_name
+    }
+  }
+}
+
+# -----------------------------
+# Lambda: POST /uploads/init
+# -----------------------------
+resource "aws_lambda_function" "uploads_init" {
+  function_name = "${local.project_name}-uploads-init"
+  role          = aws_iam_role.lambda_exec.arn
+  handler       = "lambda_function.lambda_handler"
+  runtime       = "python3.11"
+
+  filename         = "${path.module}/../backend/uploads_init/uploads_init.zip"
+  source_code_hash = filebase64sha256("${path.module}/../backend/uploads_init/uploads_init.zip")
+
+  timeout     = 15
+  memory_size = 128
+  layers      = []
+
+  environment {
+    variables = {
+      INGEST_BUCKET = data.aws_s3_bucket.raw.bucket
+      UPLOAD_PREFIX = "uploads"
     }
   }
 }
@@ -382,11 +479,12 @@ resource "aws_lambda_permission" "s3_invoke_ingest" {
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.ingest.function_name
   principal     = "s3.amazonaws.com"
-  source_arn    = aws_s3_bucket.raw.arn
+  source_arn = data.aws_s3_bucket.raw.arn
+
 }
 
 resource "aws_s3_bucket_notification" "raw_bucket_notification" {
-  bucket = aws_s3_bucket.raw.id
+  bucket = data.aws_s3_bucket.raw.id
 
   lambda_function {
     lambda_function_arn = aws_lambda_function.ingest.arn
@@ -402,6 +500,12 @@ resource "aws_s3_bucket_notification" "raw_bucket_notification" {
 resource "aws_apigatewayv2_api" "api" {
   name          = "${local.project_name}-api"
   protocol_type = "HTTP"
+
+  cors_configuration {
+    allow_origins = ["https://${aws_cloudfront_distribution.site.domain_name}"]
+    allow_methods = ["GET", "POST", "OPTIONS"]
+    allow_headers = ["*"]
+  }
 }
 
 # Integration for GET /tracks
@@ -434,6 +538,21 @@ resource "aws_apigatewayv2_route" "tracks_stream_route" {
   target    = "integrations/${aws_apigatewayv2_integration.tracks_stream_integration.id}"
 }
 
+# Integration for POST /uploads/init
+resource "aws_apigatewayv2_integration" "uploads_init_integration" {
+  api_id                 = aws_apigatewayv2_api.api.id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.uploads_init.arn
+  integration_method     = "POST"
+  payload_format_version = "2.0"
+}
+
+resource "aws_apigatewayv2_route" "uploads_init_route" {
+  api_id    = aws_apigatewayv2_api.api.id
+  route_key = "POST /uploads/init"
+  target    = "integrations/${aws_apigatewayv2_integration.uploads_init_integration.id}"
+}
+
 resource "aws_apigatewayv2_stage" "default_stage" {
   api_id      = aws_apigatewayv2_api.api.id
   name        = "$default"
@@ -453,6 +572,14 @@ resource "aws_lambda_permission" "api_invoke_tracks_stream" {
   statement_id  = "AllowAPIGatewayInvokeTracksStream"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.tracks_stream.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.api.execution_arn}/*/*"
+}
+
+resource "aws_lambda_permission" "api_invoke_uploads_init" {
+  statement_id  = "AllowAPIGatewayInvokeUploadsInit"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.uploads_init.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.api.execution_arn}/*/*"
 }
