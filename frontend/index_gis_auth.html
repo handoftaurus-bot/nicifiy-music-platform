@@ -931,7 +931,61 @@
       .mobileNav{display:block;}
       .miniPlayer{display:block;}
     }
+  
+    /* ====== AUTH (GIS) ====== */
+    .authArea{display:flex;align-items:center;gap:10px;}
+    .userChip{
+      display:none;
+      align-items:center;
+      gap:10px;
+      padding:8px 10px;
+      border-radius:999px;
+      border:1px solid rgba(255,255,255,.12);
+      background:rgba(255,255,255,.06);
+      cursor:pointer;
+      user-select:none;
+      max-width:320px;
+      min-width:0;
+    }
+    .userChip.show{display:flex;}
+    .userChip img{
+      width:28px;height:28px;border-radius:999px;
+      border:1px solid rgba(255,255,255,.12);
+      object-fit:cover;
+      background:rgba(255,255,255,.06);
+      flex:0 0 auto;
+    }
+    .userChip .uMeta{min-width:0;display:flex;flex-direction:column;gap:1px;}
+    .userChip .uName{font-weight:950;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .userChip .uRole{font-weight:950;font-size:11px;color:rgba(255,255,255,.60);text-transform:uppercase;letter-spacing:.08em;}
+    .authMenu{
+      position:fixed;
+      top:calc(56px + var(--safeTop));
+      right:18px;
+      width:240px;
+      border-radius:16px;
+      border:1px solid rgba(255,255,255,.12);
+      background:rgba(12,12,12,.98);
+      box-shadow:var(--shadow);
+      z-index:260;
+      display:none;
+      overflow:hidden;
+    }
+    .authMenu.show{display:block;}
+    .authMenu .mi{
+      padding:12px 12px;
+      border-bottom:1px solid rgba(255,255,255,.08);
+      font-weight:950;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+    }
+    .authMenu .mi:last-child{border-bottom:none;}
+    .authMenu .mi small{color:var(--muted);font-weight:900;}
+
   </style>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 
 <body>
@@ -969,7 +1023,28 @@
           <span class="hint">⌕</span>
           <input id="searchInput" type="text" placeholder="Search songs, artists, albums…" autocomplete="off" />
         </div>
-        <button class="btn" id="uploadBtn">Upload</button>
+
+        <div class="authArea" id="authArea">
+          <!-- GIS renders into this div when logged out -->
+          <div id="gsiButton"></div>
+
+          <!-- Shown when logged in -->
+          <div class="userChip" id="userChip" title="Account">
+            <img id="userPic" alt="" src="/assets/Current.png" />
+            <div class="uMeta">
+              <div class="uName" id="userName">—</div>
+              <div class="uRole" id="userRole">listener</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="authMenu" id="authMenu" aria-hidden="true">
+          <div class="mi"><span>Signed in</span><small id="userEmail">—</small></div>
+          <div class="mi"><span>Role</span><small id="userRoleMenu">listener</small></div>
+          <div class="mi"><button class="btn" id="logoutBtn" style="width:100%;justify-content:center;">Log out</button></div>
+        </div>
+
+        <button class="btn" id="uploadBtn" disabled title="Artists/Admins only">Upload</button>
         <button class="btn primary" id="refreshBtn">Refresh</button>
       </div>
 
@@ -1392,7 +1467,210 @@
     const TRACKS_ENDPOINT = "/tracks";
     const UPLOADS_INIT_ENDPOINT = "/uploads/init";
 
-    const FALLBACK_ART = "/assets/Current.png";
+    
+
+    // ===== AUTH (Google Identity Services) =====
+    // 1) Create a Google OAuth Client ID (Web) in Google Cloud Console.
+    // 2) Put it here (public) — this is safe to expose.
+    const GOOGLE_CLIENT_ID = "PASTE_YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com";
+
+    // Your API must implement these (see server code below):
+    //   POST /auth/google  { credential } -> { token, user }
+    //   GET  /me           (Authorization: Bearer <token>) -> { user }
+    //   POST /auth/logout  (optional)
+    const AUTH_GOOGLE_ENDPOINT = "/auth/google";
+    const AUTH_ME_ENDPOINT     = "/me";
+    const AUTH_LOGOUT_ENDPOINT = "/auth/logout";
+
+    const AUTH_TOKEN_KEY = "current_auth_token_v1";
+
+    const auth = {
+      token: null,
+      user: null,  // { sub, email, name, picture, role }
+    };
+
+    function isAdmin(){ return auth.user?.role === "admin"; }
+    function isArtist(){ return auth.user?.role === "artist" || isAdmin(); }
+    function isListener(){ return !!auth.user; } // logged-in user is at least listener
+
+    function setAuthToken(t){
+      auth.token = t || null;
+      if (auth.token) localStorage.setItem(AUTH_TOKEN_KEY, auth.token);
+      else localStorage.removeItem(AUTH_TOKEN_KEY);
+    }
+
+    function applyAuthUI(){
+      // Toggle Upload privilege (artist/admin only)
+      if (els.uploadBtn){
+        if (isArtist()){
+          els.uploadBtn.disabled = false;
+          els.uploadBtn.title = "Upload (artist/admin)";
+        } else {
+          els.uploadBtn.disabled = true;
+          els.uploadBtn.title = auth.user ? "Upload is for Artists/Admins" : "Sign in to upload";
+        }
+      }
+
+      // Toggle GIS button vs user chip
+      const gsiButton = document.getElementById("gsiButton");
+      const userChip  = document.getElementById("userChip");
+      const userPic   = document.getElementById("userPic");
+      const userName  = document.getElementById("userName");
+      const userRole  = document.getElementById("userRole");
+      const userEmail = document.getElementById("userEmail");
+      const userRoleMenu = document.getElementById("userRoleMenu");
+
+      if (!auth.user){
+        if (gsiButton) gsiButton.style.display = "block";
+        if (userChip) userChip.classList.remove("show");
+        if (userPic) userPic.src = FALLBACK_ART;
+        if (userName) userName.textContent = "—";
+        if (userRole) userRole.textContent = "listener";
+        if (userEmail) userEmail.textContent = "—";
+        if (userRoleMenu) userRoleMenu.textContent = "listener";
+        return;
+      }
+
+      if (gsiButton) gsiButton.style.display = "none";
+      if (userChip) userChip.classList.add("show");
+      if (userPic) userPic.src = artOrFallback(auth.user.picture);
+      if (userName) userName.textContent = auth.user.name || auth.user.email || "User";
+      if (userRole) userRole.textContent = auth.user.role || "listener";
+      if (userEmail) userEmail.textContent = auth.user.email || "—";
+      if (userRoleMenu) userRoleMenu.textContent = auth.user.role || "listener";
+    }
+
+    function closeAuthMenu(){
+      const menu = document.getElementById("authMenu");
+      if (menu) menu.classList.remove("show");
+    }
+    function toggleAuthMenu(){
+      const menu = document.getElementById("authMenu");
+      if (!menu) return;
+      menu.classList.toggle("show");
+    }
+
+    async function apiFetch(path, opts = {}){
+      const url = apiUrl(path);
+      const headers = new Headers(opts.headers || {});
+      if (auth.token) headers.set("Authorization", `Bearer ${auth.token}`);
+      if (!headers.has("Content-Type") && opts.body && typeof opts.body === "string"){
+        headers.set("Content-Type","application/json");
+      }
+      const res = await fetch(url, { ...opts, headers, credentials:"omit" });
+      return res;
+    }
+
+    async function authMe(){
+      if (!auth.token) return null;
+      const res = await apiFetch(AUTH_ME_ENDPOINT, { method:"GET" });
+      if (!res.ok){
+        // token invalid/expired
+        setAuthToken(null);
+        auth.user = null;
+        applyAuthUI();
+        return null;
+      }
+      const data = await res.json().catch(()=> ({}));
+      auth.user = data.user || null;
+      applyAuthUI();
+      return auth.user;
+    }
+
+    async function authWithGoogleCredential(credential){
+      const res = await fetch(apiUrl(AUTH_GOOGLE_ENDPOINT), {
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify({ credential }),
+      });
+      if (!res.ok){
+        const txt = await res.text().catch(()=> "");
+        throw new Error(`Auth failed: ${res.status} ${res.statusText} ${txt}`);
+      }
+      const data = await res.json().catch(()=> ({}));
+      if (!data.token || !data.user) throw new Error("Auth response missing token/user.");
+      setAuthToken(data.token);
+      auth.user = data.user;
+      applyAuthUI();
+      return data.user;
+    }
+
+    async function logout(){
+      try{
+        if (auth.token){
+          await apiFetch(AUTH_LOGOUT_ENDPOINT, { method:"POST" }).catch(()=>{});
+        }
+      } finally {
+        setAuthToken(null);
+        auth.user = null;
+        applyAuthUI();
+        closeAuthMenu();
+        // re-render GIS button if needed
+        renderGsiButton();
+        toast("Logged out.");
+      }
+    }
+
+    function handleCredentialResponse(response){
+      // response.credential is the Google ID token (JWT)
+      if (!response?.credential) return;
+      authWithGoogleCredential(response.credential)
+        .then(u => toast(`Welcome, ${u.name || u.email || "user"}!`))
+        .catch(err => { console.error(err); toast(err.message || "Login failed"); });
+    }
+
+    function renderGsiButton(){
+      const mount = document.getElementById("gsiButton");
+      if (!mount) return;
+      mount.innerHTML = "";
+      if (!window.google?.accounts?.id) return;
+
+      // Initialize once per page
+      google.accounts.id.initialize({
+        client_id: GOOGLE_CLIENT_ID,
+        callback: handleCredentialResponse,
+        ux_mode: "popup",
+      });
+
+      // Render the standard button
+      google.accounts.id.renderButton(mount, {
+        theme: "outline",
+        size: "large",
+        shape: "pill",
+        width: 210,
+        text: "signin_with",
+      });
+
+      // Optional One Tap prompt (comment out if you don't want it)
+      // google.accounts.id.prompt();
+    }
+
+    async function initAuth(){
+      // menu + close on outside click
+      const userChip = document.getElementById("userChip");
+      const logoutBtn = document.getElementById("logoutBtn");
+
+      if (userChip){
+        userChip.addEventListener("click", (e)=>{ e.stopPropagation(); toggleAuthMenu(); });
+      }
+      if (logoutBtn){
+        logoutBtn.addEventListener("click", (e)=>{ e.preventDefault(); logout(); });
+      }
+      document.addEventListener("click", closeAuthMenu);
+
+      // Load token from storage
+      const saved = localStorage.getItem(AUTH_TOKEN_KEY);
+      if (saved) auth.token = saved;
+
+      // If we have a token, validate /me; else show GIS button
+      if (auth.token){
+        await authMe();
+      }
+      applyAuthUI();
+      renderGsiButton();
+    }
+
+const FALLBACK_ART = "/assets/Current.png";
 
     const ICONS = {
       shuffle: `
@@ -2934,7 +3212,8 @@
 
     // ===== UPLOAD MODAL =====
     function openUploadModal(){
-      els.uploadOverlay.classList.add("show");
+      if (!isArtist()) { toast("Upload is for Artists/Admins. Ask an admin to grant Artist role."); return; }
+els.uploadOverlay.classList.add("show");
       els.uploadOverlay.setAttribute("aria-hidden","false");
       validateUploadForm();
     }
@@ -3184,7 +3463,8 @@
       loadLikes();
       loadModes();
 
-      // default artwork + img error fallback
+      await initAuth();
+// default artwork + img error fallback
       [els.nowArt, els.miniArt, els.npArt, els.albumArt, els.artistArt].forEach(img=>{
         if (!img) return;
         if (!img.getAttribute("src")) img.setAttribute("src", FALLBACK_ART);

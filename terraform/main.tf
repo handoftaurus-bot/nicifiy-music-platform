@@ -19,7 +19,6 @@ locals {
   project_name = "nicify"
 }
 
-# Random suffix to keep bucket names unique
 resource "random_id" "suffix" {
   byte_length = 4
 }
@@ -30,9 +29,8 @@ data "aws_s3_bucket" "raw" {
   bucket = "nicify-raw-0238b3fd"
 }
 
-
 # -----------------------------
-# S3 buckets: site + audio + raw
+# S3 buckets: site + audio
 # -----------------------------
 resource "aws_s3_bucket" "site" {
   bucket = "${local.project_name}-web-${random_id.suffix.hex}"
@@ -42,7 +40,6 @@ resource "aws_s3_bucket" "audio" {
   bucket = "${local.project_name}-audio-${random_id.suffix.hex}"
 }
 
-# Block ALL public access (recommended with CloudFront OAC)
 resource "aws_s3_bucket_public_access_block" "site" {
   bucket                  = aws_s3_bucket.site.id
   block_public_acls       = true
@@ -60,7 +57,7 @@ resource "aws_s3_bucket_public_access_block" "audio" {
 }
 
 # -----------------------------
-# CloudFront Origin Access Control (OAC)
+# CloudFront OAC
 # -----------------------------
 resource "aws_cloudfront_origin_access_control" "site_oac" {
   name                              = "${local.project_name}-site-oac"
@@ -94,7 +91,6 @@ resource "aws_cloudfront_response_headers_policy" "audio_cors" {
     }
 
     access_control_allow_origins {
-      # Tighten later to your site domain(s) once confirmed working
       items = ["*"]
     }
 
@@ -107,8 +103,8 @@ resource "aws_s3_bucket_cors_configuration" "audio_cors" {
 
   cors_rule {
     allowed_methods = ["GET", "HEAD"]
-    allowed_origins = ["*"]         # tighten later
-    allowed_headers = ["*"]         # includes Range
+    allowed_origins = ["*"]
+    allowed_headers = ["*"]
 
     expose_headers = [
       "Accept-Ranges",
@@ -142,7 +138,6 @@ resource "aws_s3_bucket_cors_configuration" "raw_cors" {
   }
 }
 
-
 # -----------------------------
 # CloudFront for site (web UI)
 # -----------------------------
@@ -164,8 +159,6 @@ resource "aws_cloudfront_distribution" "site" {
     cached_methods  = ["GET", "HEAD"]
 
     compress = true
-
-    # Keep site public via CloudFront (not restricted by key groups)
     trusted_key_groups = []
 
     forwarded_values {
@@ -203,13 +196,10 @@ resource "aws_cloudfront_distribution" "audio" {
     target_origin_id       = "audio-origin"
     viewer_protocol_policy = "redirect-to-https"
 
-    # Add OPTIONS so browsers can preflight if needed
     allowed_methods = ["GET", "HEAD", "OPTIONS"]
     cached_methods  = ["GET", "HEAD"]
 
     compress = true
-
-    # CORS headers for audio responses served by CloudFront
     response_headers_policy_id = aws_cloudfront_response_headers_policy.audio_cors.id
 
     forwarded_values {
@@ -242,15 +232,11 @@ resource "aws_s3_bucket_policy" "site_policy" {
     Statement = [{
       Sid    = "AllowCloudFrontReadOnlySite"
       Effect = "Allow"
-      Principal = {
-        Service = "cloudfront.amazonaws.com"
-      }
+      Principal = { Service = "cloudfront.amazonaws.com" }
       Action   = "s3:GetObject"
       Resource = "${aws_s3_bucket.site.arn}/*"
       Condition = {
-        StringEquals = {
-          "AWS:SourceArn" = aws_cloudfront_distribution.site.arn
-        }
+        StringEquals = { "AWS:SourceArn" = aws_cloudfront_distribution.site.arn }
       }
     }]
   })
@@ -264,15 +250,11 @@ resource "aws_s3_bucket_policy" "audio_policy" {
     Statement = [{
       Sid    = "AllowCloudFrontReadOnlyAudio"
       Effect = "Allow"
-      Principal = {
-        Service = "cloudfront.amazonaws.com"
-      }
+      Principal = { Service = "cloudfront.amazonaws.com" }
       Action   = "s3:GetObject"
       Resource = "${aws_s3_bucket.audio.arn}/*"
       Condition = {
-        StringEquals = {
-          "AWS:SourceArn" = aws_cloudfront_distribution.audio.arn
-        }
+        StringEquals = { "AWS:SourceArn" = aws_cloudfront_distribution.audio.arn }
       }
     }]
   })
@@ -300,15 +282,11 @@ resource "aws_iam_role" "lambda_exec" {
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Principal = {
-          Service = "lambda.amazonaws.com"
-        }
-        Action = "sts:AssumeRole"
-      }
-    ]
+    Statement = [{
+      Effect = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action = "sts:AssumeRole"
+    }]
   })
 }
 
@@ -331,34 +309,21 @@ resource "aws_iam_role_policy" "lambda_policy" {
       {
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:ListBucket"]
-        Resource = [
-          data.aws_s3_bucket.raw.arn,
-         "${data.aws_s3_bucket.raw.arn}/*"
-        ]
-
+        Resource = [data.aws_s3_bucket.raw.arn,"${data.aws_s3_bucket.raw.arn}/*"]
       },
       {
         Effect   = "Allow"
-        Action   = ["s3:PutObject", "s3:CopyObject", "s3:ListBucket"]
-        Resource = [
-          aws_s3_bucket.audio.arn,
-          "${aws_s3_bucket.audio.arn}/*"
-        ]
+        Action   = ["s3:PutObject", "s3:CopyObject", "s3:ListBucket", "s3:GetObject"]
+        Resource = [aws_s3_bucket.audio.arn,"${aws_s3_bucket.audio.arn}/*"]
       },
-        # Allow uploads_init to PUT into raw bucket under raw/*
+      # Allow uploads_init to PUT into raw bucket under raw/*
       {
         Effect = "Allow"
-        Action = [
-          "s3:PutObject",
-          "s3:AbortMultipartUpload",
-          "s3:ListBucketMultipartUploads",
-          "s3:ListMultipartUploadParts"
-        ]
+        Action = ["s3:PutObject","s3:AbortMultipartUpload","s3:ListBucketMultipartUploads","s3:ListMultipartUploadParts"]
         Resource = [
-          "${data.aws_s3_bucket.raw.arn}/raw/*"
-        ]
+          "${data.aws_s3_bucket.raw.arn}/raw/*"]
       },
-      # Optional: allow listing only that prefix (useful for troubleshooting/tools)
+      # Optional: allow listing only that prefix
       {
         Effect = "Allow"
         Action = ["s3:ListBucket"]
@@ -368,13 +333,13 @@ resource "aws_iam_role_policy" "lambda_policy" {
             "s3:prefix" = ["raw/*"]
           }
         }
-      },
+      }
     ]
   })
 }
 
 # -----------------------------
-# Lambda: GET /tracks
+# Lambda: GET /tracks  (MISSING BEFORE - ADDED)
 # -----------------------------
 resource "aws_lambda_function" "tracks_api" {
   function_name = "${local.project_name}-tracks-api"
@@ -385,30 +350,31 @@ resource "aws_lambda_function" "tracks_api" {
   filename         = "${path.module}/../backend/tracks_api/tracks_api.zip"
   source_code_hash = filebase64sha256("${path.module}/../backend/tracks_api/tracks_api.zip")
 
+  timeout     = 15
+  memory_size = 128
+
   environment {
     variables = {
-      TRACKS_TABLE = aws_dynamodb_table.tracks.name
+      TRACKS_TABLE            = aws_dynamodb_table.tracks.name
+      AUDIO_CLOUDFRONT_DOMAIN = aws_cloudfront_distribution.audio.domain_name
     }
   }
 }
 
 # -----------------------------
-# Lambda: GET /tracks/{track_id}/stream
+# Lambda: GET /tracks/{track_id}/stream  (MISSING BEFORE - ADDED)
 # -----------------------------
 resource "aws_lambda_function" "tracks_stream" {
   function_name = "${local.project_name}-tracks-stream"
   role          = aws_iam_role.lambda_exec.arn
   handler       = "lambda_function.lambda_handler"
   runtime       = "python3.11"
-  filename      = "${path.module}/../backend/tracks_stream/tracks_stream.zip"
 
+  filename         = "${path.module}/../backend/tracks_stream/tracks_stream.zip"
   source_code_hash = filebase64sha256("${path.module}/../backend/tracks_stream/tracks_stream.zip")
 
-  timeout     = 10
-  memory_size = 256
-
-  # Explicitly no layers (prevents cryptography/glibc issues)
-  layers = []
+  timeout     = 15
+  memory_size = 128
 
   environment {
     variables = {
@@ -432,12 +398,10 @@ resource "aws_lambda_function" "uploads_init" {
 
   timeout     = 15
   memory_size = 128
-  layers      = []
 
   environment {
     variables = {
       INGEST_BUCKET = data.aws_s3_bucket.raw.bucket
-      UPLOAD_PREFIX = "uploads"
     }
   }
 }
@@ -479,8 +443,7 @@ resource "aws_lambda_permission" "s3_invoke_ingest" {
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.ingest.function_name
   principal     = "s3.amazonaws.com"
-  source_arn = data.aws_s3_bucket.raw.arn
-
+  source_arn    = data.aws_s3_bucket.raw.arn
 }
 
 resource "aws_s3_bucket_notification" "raw_bucket_notification" {
@@ -508,7 +471,6 @@ resource "aws_apigatewayv2_api" "api" {
   }
 }
 
-# Integration for GET /tracks
 resource "aws_apigatewayv2_integration" "tracks_integration" {
   api_id                 = aws_apigatewayv2_api.api.id
   integration_type       = "AWS_PROXY"
@@ -523,7 +485,6 @@ resource "aws_apigatewayv2_route" "tracks_route" {
   target    = "integrations/${aws_apigatewayv2_integration.tracks_integration.id}"
 }
 
-# Integration for GET /tracks/{track_id}/stream
 resource "aws_apigatewayv2_integration" "tracks_stream_integration" {
   api_id                 = aws_apigatewayv2_api.api.id
   integration_type       = "AWS_PROXY"
@@ -538,7 +499,6 @@ resource "aws_apigatewayv2_route" "tracks_stream_route" {
   target    = "integrations/${aws_apigatewayv2_integration.tracks_stream_integration.id}"
 }
 
-# Integration for POST /uploads/init
 resource "aws_apigatewayv2_integration" "uploads_init_integration" {
   api_id                 = aws_apigatewayv2_api.api.id
   integration_type       = "AWS_PROXY"
@@ -559,7 +519,6 @@ resource "aws_apigatewayv2_stage" "default_stage" {
   auto_deploy = true
 }
 
-# Lambda invoke permissions
 resource "aws_lambda_permission" "api_invoke_tracks" {
   statement_id  = "AllowAPIGatewayInvokeTracks"
   action        = "lambda:InvokeFunction"
