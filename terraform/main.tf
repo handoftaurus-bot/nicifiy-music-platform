@@ -15,6 +15,33 @@ provider "aws" {
   region = "us-east-1"
 }
 
+# -----------------------------
+# Inputs (keep secrets out of code)
+# -----------------------------
+variable "raw_bucket_name" {
+  type        = string
+  description = "Existing raw ingest bucket name (already created)."
+  default     = "nicify-raw-0238b3fd"
+}
+
+variable "google_client_id" {
+  type        = string
+  description = "Google OAuth Client ID for GIS (Web)."
+  default     = "26760372266-rp3i6d5n95fc1rbnfan6mbpteofe94av.apps.googleusercontent.com"
+}
+
+variable "admin_email_allowlist" {
+  type        = string
+  description = "Comma-separated emails allowed to bootstrap admin role."
+  default     = "handoftaurus@gmail.com"
+}
+
+variable "jwt_secret" {
+  type        = string
+  sensitive   = true
+  description = "JWT signing secret used by auth_api and verified by uploads_init."
+}
+
 locals {
   project_name = "nicify"
 }
@@ -26,7 +53,7 @@ resource "random_id" "suffix" {
 data "aws_caller_identity" "current" {}
 
 data "aws_s3_bucket" "raw" {
-  bucket = "nicify-raw-0238b3fd"
+  bucket = var.raw_bucket_name
 }
 
 # -----------------------------
@@ -82,17 +109,9 @@ resource "aws_cloudfront_response_headers_policy" "audio_cors" {
   cors_config {
     access_control_allow_credentials = false
 
-    access_control_allow_headers {
-      items = ["*"]
-    }
-
-    access_control_allow_methods {
-      items = ["GET", "HEAD", "OPTIONS"]
-    }
-
-    access_control_allow_origins {
-      items = ["*"]
-    }
+    access_control_allow_headers { items = ["*"] }
+    access_control_allow_methods { items = ["GET", "HEAD", "OPTIONS"] }
+    access_control_allow_origins { items = ["*"] }
 
     origin_override = true
   }
@@ -158,21 +177,17 @@ resource "aws_cloudfront_distribution" "site" {
     allowed_methods = ["GET", "HEAD"]
     cached_methods  = ["GET", "HEAD"]
 
-    compress = true
+    compress           = true
     trusted_key_groups = []
 
     forwarded_values {
       query_string = false
-      cookies {
-        forward = "none"
-      }
+      cookies { forward = "none" }
     }
   }
 
   restrictions {
-    geo_restriction {
-      restriction_type = "none"
-    }
+    geo_restriction { restriction_type = "none" }
   }
 
   viewer_certificate {
@@ -199,21 +214,17 @@ resource "aws_cloudfront_distribution" "audio" {
     allowed_methods = ["GET", "HEAD", "OPTIONS"]
     cached_methods  = ["GET", "HEAD"]
 
-    compress = true
+    compress                   = true
     response_headers_policy_id = aws_cloudfront_response_headers_policy.audio_cors.id
 
     forwarded_values {
       query_string = false
-      cookies {
-        forward = "none"
-      }
+      cookies { forward = "none" }
     }
   }
 
   restrictions {
-    geo_restriction {
-      restriction_type = "none"
-    }
+    geo_restriction { restriction_type = "none" }
   }
 
   viewer_certificate {
@@ -230,11 +241,11 @@ resource "aws_s3_bucket_policy" "site_policy" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Sid    = "AllowCloudFrontReadOnlySite"
-      Effect = "Allow"
+      Sid       = "AllowCloudFrontReadOnlySite"
+      Effect    = "Allow"
       Principal = { Service = "cloudfront.amazonaws.com" }
-      Action   = "s3:GetObject"
-      Resource = "${aws_s3_bucket.site.arn}/*"
+      Action    = "s3:GetObject"
+      Resource  = "${aws_s3_bucket.site.arn}/*"
       Condition = {
         StringEquals = { "AWS:SourceArn" = aws_cloudfront_distribution.site.arn }
       }
@@ -248,11 +259,11 @@ resource "aws_s3_bucket_policy" "audio_policy" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Sid    = "AllowCloudFrontReadOnlyAudio"
-      Effect = "Allow"
+      Sid       = "AllowCloudFrontReadOnlyAudio"
+      Effect    = "Allow"
       Principal = { Service = "cloudfront.amazonaws.com" }
-      Action   = "s3:GetObject"
-      Resource = "${aws_s3_bucket.audio.arn}/*"
+      Action    = "s3:GetObject"
+      Resource  = "${aws_s3_bucket.audio.arn}/*"
       Condition = {
         StringEquals = { "AWS:SourceArn" = aws_cloudfront_distribution.audio.arn }
       }
@@ -275,6 +286,44 @@ resource "aws_dynamodb_table" "tracks" {
 }
 
 # -----------------------------
+# DynamoDB table for users (auth + roles + artist applications)
+# -----------------------------
+resource "aws_dynamodb_table" "users" {
+  name         = "${local.project_name}-users"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "pk"
+  range_key    = "sk"
+
+  attribute {
+    name = "pk"
+    type = "S"
+  }
+
+  attribute {
+    name = "sk"
+    type = "S"
+  }
+
+  attribute {
+    name = "gsi1pk"
+    type = "S"
+  }
+
+  attribute {
+    name = "gsi1sk"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "GSI1"
+    hash_key        = "gsi1pk"
+    range_key       = "gsi1sk"
+    projection_type = "ALL"
+  }
+}
+
+
+# -----------------------------
 # IAM role & policy for Lambdas
 # -----------------------------
 resource "aws_iam_role" "lambda_exec" {
@@ -283,9 +332,9 @@ resource "aws_iam_role" "lambda_exec" {
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect = "Allow"
+      Effect    = "Allow"
       Principal = { Service = "lambda.amazonaws.com" }
-      Action = "sts:AssumeRole"
+      Action    = "sts:AssumeRole"
     }]
   })
 }
@@ -302,36 +351,37 @@ resource "aws_iam_role_policy" "lambda_policy" {
         Resource = "arn:aws:logs:*:*:*"
       },
       {
-        Effect   = "Allow"
-        Action   = ["dynamodb:Scan", "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
-        Resource = aws_dynamodb_table.tracks.arn
+        Effect = "Allow"
+        Action = ["dynamodb:Scan", "dynamodb:Query", "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
+        Resource = [
+          aws_dynamodb_table.tracks.arn,
+          aws_dynamodb_table.users.arn,
+          "${aws_dynamodb_table.users.arn}/index/*"
+        ]
       },
       {
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:ListBucket"]
-        Resource = [data.aws_s3_bucket.raw.arn,"${data.aws_s3_bucket.raw.arn}/*"]
+        Resource = [data.aws_s3_bucket.raw.arn, "${data.aws_s3_bucket.raw.arn}/*"]
       },
       {
         Effect   = "Allow"
         Action   = ["s3:PutObject", "s3:CopyObject", "s3:ListBucket", "s3:GetObject"]
-        Resource = [aws_s3_bucket.audio.arn,"${aws_s3_bucket.audio.arn}/*"]
+        Resource = [aws_s3_bucket.audio.arn, "${aws_s3_bucket.audio.arn}/*"]
       },
       # Allow uploads_init to PUT into raw bucket under raw/*
       {
-        Effect = "Allow"
-        Action = ["s3:PutObject","s3:AbortMultipartUpload","s3:ListBucketMultipartUploads","s3:ListMultipartUploadParts"]
-        Resource = [
-          "${data.aws_s3_bucket.raw.arn}/raw/*"]
+        Effect   = "Allow"
+        Action   = ["s3:PutObject", "s3:AbortMultipartUpload", "s3:ListBucketMultipartUploads", "s3:ListMultipartUploadParts"]
+        Resource = ["${data.aws_s3_bucket.raw.arn}/raw/*"]
       },
       # Optional: allow listing only that prefix
       {
-        Effect = "Allow"
-        Action = ["s3:ListBucket"]
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
         Resource = [data.aws_s3_bucket.raw.arn]
         Condition = {
-          StringLike = {
-            "s3:prefix" = ["raw/*"]
-          }
+          StringLike = { "s3:prefix" = ["raw/*"] }
         }
       }
     ]
@@ -339,7 +389,7 @@ resource "aws_iam_role_policy" "lambda_policy" {
 }
 
 # -----------------------------
-# Lambda: GET /tracks  (MISSING BEFORE - ADDED)
+# Lambda: GET /tracks
 # -----------------------------
 resource "aws_lambda_function" "tracks_api" {
   function_name = "${local.project_name}-tracks-api"
@@ -362,7 +412,7 @@ resource "aws_lambda_function" "tracks_api" {
 }
 
 # -----------------------------
-# Lambda: GET /tracks/{track_id}/stream  (MISSING BEFORE - ADDED)
+# Lambda: GET /tracks/{track_id}/stream
 # -----------------------------
 resource "aws_lambda_function" "tracks_stream" {
   function_name = "${local.project_name}-tracks-stream"
@@ -402,6 +452,7 @@ resource "aws_lambda_function" "uploads_init" {
   environment {
     variables = {
       INGEST_BUCKET = data.aws_s3_bucket.raw.bucket
+      JWT_SECRET    = var.jwt_secret
     }
   }
 }
@@ -458,6 +509,32 @@ resource "aws_s3_bucket_notification" "raw_bucket_notification" {
 }
 
 # -----------------------------
+# Lambda: Auth + roles + artist applications (Node.js)
+# -----------------------------
+resource "aws_lambda_function" "auth_api" {
+  function_name = "${local.project_name}-auth-api"
+  role          = aws_iam_role.lambda_exec.arn
+  handler       = "handler.handler"
+  runtime       = "nodejs22.x"
+
+  # FIXED: match the ../backend path used by your other lambdas
+  filename         = "${path.module}/../backend/auth_api/auth_api.zip"
+  source_code_hash = filebase64sha256("${path.module}/../backend/auth_api/auth_api.zip")
+
+  timeout     = 15
+  memory_size = 256
+
+  environment {
+    variables = {
+      GOOGLE_CLIENT_ID      = var.google_client_id
+      JWT_SECRET            = var.jwt_secret
+      USERS_TABLE           = aws_dynamodb_table.users.name
+      ADMIN_EMAIL_ALLOWLIST = var.admin_email_allowlist
+    }
+  }
+}
+
+# -----------------------------
 # API Gateway HTTP API
 # -----------------------------
 resource "aws_apigatewayv2_api" "api" {
@@ -471,6 +548,13 @@ resource "aws_apigatewayv2_api" "api" {
   }
 }
 
+resource "aws_apigatewayv2_stage" "default_stage" {
+  api_id      = aws_apigatewayv2_api.api.id
+  name        = "$default"
+  auto_deploy = true
+}
+
+# ---- tracks ----
 resource "aws_apigatewayv2_integration" "tracks_integration" {
   api_id                 = aws_apigatewayv2_api.api.id
   integration_type       = "AWS_PROXY"
@@ -485,6 +569,15 @@ resource "aws_apigatewayv2_route" "tracks_route" {
   target    = "integrations/${aws_apigatewayv2_integration.tracks_integration.id}"
 }
 
+resource "aws_lambda_permission" "api_invoke_tracks" {
+  statement_id  = "AllowAPIGatewayInvokeTracks"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.tracks_api.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.api.execution_arn}/*/*"
+}
+
+# ---- stream ----
 resource "aws_apigatewayv2_integration" "tracks_stream_integration" {
   api_id                 = aws_apigatewayv2_api.api.id
   integration_type       = "AWS_PROXY"
@@ -499,6 +592,15 @@ resource "aws_apigatewayv2_route" "tracks_stream_route" {
   target    = "integrations/${aws_apigatewayv2_integration.tracks_stream_integration.id}"
 }
 
+resource "aws_lambda_permission" "api_invoke_tracks_stream" {
+  statement_id  = "AllowAPIGatewayInvokeTracksStream"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.tracks_stream.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.api.execution_arn}/*/*"
+}
+
+# ---- uploads/init ----
 resource "aws_apigatewayv2_integration" "uploads_init_integration" {
   api_id                 = aws_apigatewayv2_api.api.id
   integration_type       = "AWS_PROXY"
@@ -513,32 +615,63 @@ resource "aws_apigatewayv2_route" "uploads_init_route" {
   target    = "integrations/${aws_apigatewayv2_integration.uploads_init_integration.id}"
 }
 
-resource "aws_apigatewayv2_stage" "default_stage" {
-  api_id      = aws_apigatewayv2_api.api.id
-  name        = "$default"
-  auto_deploy = true
-}
-
-resource "aws_lambda_permission" "api_invoke_tracks" {
-  statement_id  = "AllowAPIGatewayInvokeTracks"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.tracks_api.function_name
-  principal     = "apigateway.amazonaws.com"
-  source_arn    = "${aws_apigatewayv2_api.api.execution_arn}/*/*"
-}
-
-resource "aws_lambda_permission" "api_invoke_tracks_stream" {
-  statement_id  = "AllowAPIGatewayInvokeTracksStream"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.tracks_stream.function_name
-  principal     = "apigateway.amazonaws.com"
-  source_arn    = "${aws_apigatewayv2_api.api.execution_arn}/*/*"
-}
-
 resource "aws_lambda_permission" "api_invoke_uploads_init" {
   statement_id  = "AllowAPIGatewayInvokeUploadsInit"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.uploads_init.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.api.execution_arn}/*/*"
+}
+
+# ---- auth ----
+resource "aws_apigatewayv2_integration" "auth_integration" {
+  api_id                 = aws_apigatewayv2_api.api.id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.auth_api.arn
+  integration_method     = "POST"
+  payload_format_version = "2.0"
+}
+
+resource "aws_apigatewayv2_route" "auth_google_route" {
+  api_id    = aws_apigatewayv2_api.api.id
+  route_key = "POST /auth/google"
+  target    = "integrations/${aws_apigatewayv2_integration.auth_integration.id}"
+}
+
+resource "aws_apigatewayv2_route" "me_route" {
+  api_id    = aws_apigatewayv2_api.api.id
+  route_key = "GET /me"
+  target    = "integrations/${aws_apigatewayv2_integration.auth_integration.id}"
+}
+
+resource "aws_apigatewayv2_route" "artist_apply_route" {
+  api_id    = aws_apigatewayv2_api.api.id
+  route_key = "POST /artist/apply"
+  target    = "integrations/${aws_apigatewayv2_integration.auth_integration.id}"
+}
+
+resource "aws_apigatewayv2_route" "admin_list_apps_route" {
+  api_id    = aws_apigatewayv2_api.api.id
+  route_key = "GET /admin/artist-applications"
+  target    = "integrations/${aws_apigatewayv2_integration.auth_integration.id}"
+}
+
+resource "aws_apigatewayv2_route" "admin_approve_route" {
+  api_id    = aws_apigatewayv2_api.api.id
+  route_key = "POST /admin/artist-applications/{sub}/approve"
+  target    = "integrations/${aws_apigatewayv2_integration.auth_integration.id}"
+}
+
+resource "aws_apigatewayv2_route" "admin_reject_route" {
+  api_id    = aws_apigatewayv2_api.api.id
+  route_key = "POST /admin/artist-applications/{sub}/reject"
+  target    = "integrations/${aws_apigatewayv2_integration.auth_integration.id}"
+}
+
+resource "aws_lambda_permission" "api_invoke_auth" {
+  statement_id  = "AllowAPIGatewayInvokeAuth"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.auth_api.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.api.execution_arn}/*/*"
 }

@@ -1,0 +1,53 @@
+:root{
+  --bg: #000;
+  --panel: #121212;
+  --panel2: #181818;
+  --text: #e7e7e7;
+  --muted: #9aa4b2;
+  --border: #242424;
+  --brand: #4ba3ee;
+}
+
+.app{
+  height: 100vh;
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  grid-template-rows: 1fr 92px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.sidebar{
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  background: #0b0b0b;
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.main{
+  grid-column: 2;
+  grid-row: 1;
+  display: grid;
+  grid-template-rows: 64px 1fr;
+  overflow: hidden;
+}
+
+.topbar{
+  background: rgba(0,0,0,.6);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border);
+}
+
+.content{
+  overflow: auto;
+  padding: 18px 22px 120px; /* bottom padding so content doesn’t hide behind player */
+  background: linear-gradient(180deg, rgba(75,163,238,.12), rgba(0,0,0,0) 280px);
+}
+
+.player{
+  grid-column: 2;
+  grid-row: 2;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+}

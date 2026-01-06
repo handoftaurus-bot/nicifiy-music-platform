@@ -1,11 +1,15 @@
 import json
 import os
 import re
+import base64
+import hashlib
+import hmac
 import time
 import boto3
 from botocore.config import Config
 
 INGEST_BUCKET = os.environ["INGEST_BUCKET"]
+JWT_SECRET = os.environ.get("JWT_SECRET", "")
 
 # Force SigV4 and pin region (good)
 s3 = boto3.client("s3", config=Config(signature_version="s3v4", region_name="us-east-1"))
@@ -15,9 +19,60 @@ def _headers():
         "Content-Type": "application/json",
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "POST,OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Headers": "Content-Type,Authorization",
         "Cache-Control": "no-store",
     }
+
+def _b64url_decode(s: str) -> bytes:
+    s = s.replace("-", "+").replace("_", "/")
+    pad = "=" * ((4 - len(s) % 4) % 4)
+    return base64.b64decode(s + pad)
+
+def _verify_jwt_hs256(token: str) -> dict:
+    """
+    Verifies JWT signature + exp. Returns payload dict.
+    Assumes HS256.
+    """
+    if not JWT_SECRET:
+        raise Exception("JWT_SECRET not configured")
+
+    parts = token.split(".")
+    if len(parts) != 3:
+        raise Exception("Invalid token format")
+
+    header_b64, payload_b64, sig_b64 = parts
+    signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
+
+    expected = hmac.new(JWT_SECRET.encode("utf-8"), signing_input, hashlib.sha256).digest()
+    actual = _b64url_decode(sig_b64)
+
+    if not hmac.compare_digest(expected, actual):
+        raise Exception("Invalid token signature")
+
+    payload_json = _b64url_decode(payload_b64).decode("utf-8")
+    payload = json.loads(payload_json)
+
+    # exp check (if present)
+    exp = payload.get("exp")
+    if exp is not None and int(exp) < int(time.time()):
+        raise Exception("Token expired")
+
+    return payload
+
+def _require_artist_or_admin(event) -> dict:
+    headers = event.get("headers") or {}
+    auth = headers.get("authorization") or headers.get("Authorization") or ""
+    if not auth.lower().startswith("bearer "):
+        raise Exception("Missing Bearer token")
+
+    token = auth.split(" ", 1)[1].strip()
+    payload = _verify_jwt_hs256(token)
+
+    role = (payload.get("role") or "").lower()
+    if role not in ("artist", "admin"):
+        raise Exception("Insufficient role")
+
+    return payload
 
 def _clean_display(s: str) -> str:
     """Preserve casing, just normalize whitespace + strip weird chars."""
@@ -47,6 +102,16 @@ def lambda_handler(event, context):
     if method == "OPTIONS":
         return {"statusCode": 204, "headers": _headers(), "body": ""}
 
+    # --- REAL ENFORCEMENT: only artist/admin can init uploads ---
+    try:
+        _require_artist_or_admin(event)
+    except Exception as e:
+        return {
+            "statusCode": 403,
+            "headers": _headers(),
+            "body": json.dumps({"error": "Forbidden", "detail": str(e)}),
+        }
+
     body = event.get("body") or "{}"
     if isinstance(body, str):
         body = json.loads(body)
@@ -59,7 +124,7 @@ def lambda_handler(event, context):
     release_year = body.get("release_year")
 
     audio_filename = _clean_display(body.get("audio_filename"))
-    audio_content_type = (body.get("audio_content_type") or "application/pythoctet-stream").strip()
+    audio_content_type = (body.get("audio_content_type") or "application/octet-stream").strip()
 
     art_filename = _clean_display(body.get("art_filename") or "")
     art_content_type = (body.get("art_content_type") or "application/octet-stream").strip()
@@ -81,7 +146,7 @@ def lambda_handler(event, context):
     art_key = f"raw/{artist_key}/{album_key}/{ts}__{art_filename}" if art_filename else None
     meta_key = f"raw/{artist_key}/{album_key}/{ts}__meta.json"
 
-    # Presign PUT URLs (IMPORTANT: If you include ContentType here, browser MUST send exact header)
+    # Presign PUT URLs
     audio_put_url = s3.generate_presigned_url(
         ClientMethod="put_object",
         Params={"Bucket": INGEST_BUCKET, "Key": audio_key},
@@ -98,7 +163,6 @@ def lambda_handler(event, context):
             HttpMethod="PUT",
         )
 
-    # Meta JSON: this is where we preserve exact casing + full form fields
     meta_put_url = s3.generate_presigned_url(
         ClientMethod="put_object",
         Params={"Bucket": INGEST_BUCKET, "Key": meta_key, "ContentType": "application/json"},
@@ -121,7 +185,6 @@ def lambda_handler(event, context):
             "meta_key": meta_key,
             "meta_put_url": meta_put_url,
 
-            # Echo back preserved-casing fields for debugging
             "meta_fields": {
                 "title": title,
                 "artist": artist,
